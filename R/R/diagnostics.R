@@ -71,61 +71,58 @@ generate_cutoffs <- function(df, horizon, initial, period) {
 #' @return A dataframe with the forecast, actual value, and cutoff date.
 #'
 #' @export
-cross_validation <- function(
-    model, horizon, units, period = NULL, initial = NULL) {
+cross_validation <- 
+function (model, horizon, units, period = NULL, initial = NULL, parallel.ncores = 1,debug=F) 
+{
   df <- model$history
   horizon.dt <- as.difftime(horizon, units = units)
-  # Set period
   if (is.null(period)) {
     period <- 0.5 * horizon
   }
   period.dt <- as.difftime(period, units = units)
-  # Identify largest seasonality period
   period.max <- 0
   for (s in model$seasonalities) {
     period.max <- max(period.max, s$period)
   }
-  seasonality.dt <- as.difftime(period.max, units = 'days')
-  # Set initial
+  seasonality.dt <- as.difftime(period.max, units = "days")
   if (is.null(initial)) {
-    initial.dt <- max(
-      as.difftime(3 * horizon, units = units),
-      seasonality.dt
-    )
-  } else {
+    initial.dt <- max(as.difftime(3 * horizon, units = units), 
+                      seasonality.dt)
+  }
+  else {
     initial.dt <- as.difftime(initial, units = units)
     if (initial.dt < seasonality.dt) {
-      warning(paste0('Seasonality has period of ', period.max, ' days which ',
-        'is larger than initial window. Consider increasing initial.'))
+      warning(paste0("Seasonality has period of ", period.max, 
+                     " days which ", "is larger than initial window. Consider increasing initial."))
     }
+  }
+  cutoffs <- generate_cutoffs(df, horizon.dt, initial.dt, period.dt)
+  predicts <- data.frame()
+  library(doParallel)
+  if(parallel.ncores>1){
+    cl=parallel::makeForkCluster(parallel.ncores)
+    registerDoParallel(cl)   
+  }
+  if(debug){
+    browser()
   }
   
-  predict_columns <- c('ds', 'yhat')
-  if (model$uncertainty_samples){
-    predict_columns <- append(predict_columns, c('yhat_lower', 'yhat_upper'))
-  }
-
-  cutoffs <- generate_cutoffs(df, horizon.dt, initial.dt, period.dt)
-
-  predicts <- data.frame()
-  for (i in 1:length(cutoffs)) {
+  
+  predicts_list  = foreach(i = seq_along(cutoffs)) %dopar% {
     cutoff <- cutoffs[i]
-    # Copy the model
     m <- prophet_copy(model, cutoff)
-    # Train model
     history.c <- dplyr::filter(df, ds <= cutoff)
     if (nrow(history.c) < 2) {
-      stop('Less than two datapoints before cutoff. Increase initial window.')
+      stop("Less than two datapoints before cutoff. Increase initial window.")
     }
     m <- fit.prophet(m, history.c)
-    # Calculate yhat
-    df.predict <- dplyr::filter(df, ds > cutoff, ds <= cutoff + horizon.dt)
-    # Get the columns for the future dataframe
-    columns <- 'ds'
-    if (m$growth == 'logistic') {
-      columns <- c(columns, 'cap')
+    df.predict <- dplyr::filter(df, ds > cutoff, ds <= cutoff + 
+                                  horizon.dt)
+    columns <- "ds"
+    if (m$growth == "logistic") {
+      columns <- c(columns, "cap")
       if (m$logistic.floor) {
-        columns <- c(columns, 'floor')
+        columns <- c(columns, "floor")
       }
     }
     columns <- c(columns, names(m$extra_regressors))
@@ -137,12 +134,19 @@ cross_validation <- function(
     }
     future <- df.predict[columns]
     yhat <- stats::predict(m, future)
-    # Merge yhat, y, and cutoff.
-    df.c <- dplyr::inner_join(df.predict, yhat$predict_columns, by = "ds")
-    df.c <- dplyr::select(df.c, y, yhat$predict_columns)
+    df.c <- dplyr::inner_join(df.predict, yhat, by = "ds")
+    df.c <- dplyr::select(df.c, ds, y, yhat, yhat_lower, 
+                          yhat_upper)
     df.c$cutoff <- cutoff
-    predicts <- rbind(predicts, df.c)
+    #predicts <- rbind(predicts, df.c)
+    df.c
+  
   }
+  if(debug){
+    browser()
+  }
+  
+  predicts = rbindlist(predicts_list)
   return(predicts)
 }
 
